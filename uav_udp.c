@@ -1,4 +1,3 @@
-// Server 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,17 +12,15 @@
 #define SERVER2_PORT 14661  // Port to send encrypted data to Server 2
 #define PX4_PORT 14556  // PX4 listening port
 
-#define MESSAGE_LEN 2048
-#define NONCE_LEN crypto_aead_chacha20poly1305_IETF_NPUBBYTES
+#define MESSAGE_LEN 1024
 #define CIPHERTEXT_LEN (MESSAGE_LEN + crypto_aead_chacha20poly1305_IETF_ABYTES)
 
 int main() {
     int sockfd1, sockfd2;
-    struct sockaddr_in servaddr1, servaddr2, cliaddr, server2_addr, px4_addr;
+    struct sockaddr_in servaddr1, servaddr2, cliaddr;
     int len, n;
-    unsigned char buffer[MESSAGE_LEN];
-    unsigned char nonce[NONCE_LEN];  // Nonce for encryption
-    unsigned char ciphertext[CIPHERTEXT_LEN + NONCE_LEN]; // Buffer for ciphertext + nonce
+    unsigned char buffer[MESSAGE_LEN];  // To receive plaintext messages
+    unsigned char ciphertext[CIPHERTEXT_LEN];
     unsigned long long ciphertext_len;
     unsigned char decrypted[MESSAGE_LEN];
     unsigned long long decrypted_len;
@@ -34,8 +31,9 @@ int main() {
         return 1;
     }
 
-    // Hardcoded encryption key (32 bytes)
+    // Hardcoded encryption key and nonce
     unsigned char key[crypto_aead_chacha20poly1305_IETF_KEYBYTES] = "12345678901234567890123456789012";
+    unsigned char nonce[crypto_aead_chacha20poly1305_IETF_NPUBBYTES] = "123456789012";
 
     // Create socket file descriptors
     if ((sockfd1 = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -47,7 +45,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    // Bind the first socket to PORT1 (receive from PX4 on port 14660)
+    // Bind the first socket to PORT1 (receive from PX4)
     memset(&servaddr1, 0, sizeof(servaddr1));
     servaddr1.sin_family = AF_INET;
     servaddr1.sin_addr.s_addr = INADDR_ANY;
@@ -58,7 +56,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    // Bind the second socket to PORT2 (receive encrypted commands from Server 2 on port 14662)
+    // Bind the second socket to PORT2 (receive from Server 2)
     memset(&servaddr2, 0, sizeof(servaddr2));
     servaddr2.sin_family = AF_INET;
     servaddr2.sin_addr.s_addr = INADDR_ANY;
@@ -69,13 +67,18 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    // Setup destination address for Server 2 (send encrypted to port 14661)
+    len = sizeof(cliaddr);
+    printf("Server 1 listening on ports %d (PX4) and %d (Server 2)\n", PORT1, PORT2);
+
+    // Setup destination address for Server 2
+    struct sockaddr_in server2_addr;
     memset(&server2_addr, 0, sizeof(server2_addr));
     server2_addr.sin_family = AF_INET;
-    server2_addr.sin_port = htons(SERVER2_PORT);  // Port to send to Server 2 (14661)
+    server2_addr.sin_port = htons(SERVER2_PORT);  // Port to send to Server 2
     inet_pton(AF_INET, "127.0.0.1", &server2_addr.sin_addr);
 
-    // Setup destination address for PX4 (send decrypted back to PX4 on port 14556)
+    // Setup destination address for PX4 (send back to PX4 on port 14556)
+    struct sockaddr_in px4_addr;
     memset(&px4_addr, 0, sizeof(px4_addr));
     px4_addr.sin_family = AF_INET;
     px4_addr.sin_port = htons(PX4_PORT);  // PX4 listening on port 14556
@@ -94,45 +97,31 @@ int main() {
         if (FD_ISSET(sockfd1, &readfds)) {
             // Received from PX4
             n = recvfrom(sockfd1, buffer, MESSAGE_LEN, MSG_WAITALL, (struct sockaddr *)&cliaddr, &len);
-
-            // Generate a random nonce
-            randombytes_buf(nonce, NONCE_LEN);
-
             // Encrypt the message
             if (crypto_aead_chacha20poly1305_ietf_encrypt(
-                ciphertext + NONCE_LEN, &ciphertext_len,
+                ciphertext, &ciphertext_len,
                 buffer, n,
                 NULL, 0, NULL, nonce, key) != 0) {
                 printf("Encryption failed.\n");
                 continue;
             }
-
-            // Prepend nonce to the ciphertext
-            memcpy(ciphertext, nonce, NONCE_LEN);
-            ciphertext_len += NONCE_LEN;
-
-            // Send encrypted message (including nonce) to Server 2 on port 14661
+            // Send encrypted message to Server 2
             sendto(sockfd1, ciphertext, ciphertext_len, MSG_CONFIRM, (const struct sockaddr *)&server2_addr, sizeof(server2_addr));
             printf("Encrypted and forwarded to Server 2 on port %d\n", SERVER2_PORT);
         }
 
         if (FD_ISSET(sockfd2, &readfds)) {
-            // Received encrypted data from Server 2 on port 14662
-            n = recvfrom(sockfd2, ciphertext, sizeof(ciphertext), MSG_WAITALL, (struct sockaddr *)&cliaddr, &len);
-
-            // Extract the nonce from the message
-            memcpy(nonce, ciphertext, NONCE_LEN);
-
+            // Received from Server 2
+            n = recvfrom(sockfd2, buffer, CIPHERTEXT_LEN, MSG_WAITALL, (struct sockaddr *)&cliaddr, &len);
             // Decrypt the message
             if (crypto_aead_chacha20poly1305_ietf_decrypt(
                 decrypted, &decrypted_len,
-                NULL, ciphertext + NONCE_LEN, n - NONCE_LEN,
+                NULL, buffer, n,
                 NULL, 0, nonce, key) != 0) {
                 printf("Decryption failed.\n");
                 continue;
             }
-
-            // Send decrypted message to PX4 on port 14556
+            // Send decrypted message to PX4
             sendto(sockfd1, decrypted, decrypted_len, MSG_CONFIRM, (const struct sockaddr *)&px4_addr, sizeof(px4_addr));
             printf("Decrypted and forwarded to PX4 on port %d\n", PX4_PORT);
         }
