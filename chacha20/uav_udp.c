@@ -1,12 +1,12 @@
 // Server 1
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sodium.h>
+#include <stdio.h> // standard I/O operations
+#include <stdlib.h> // standard library function for memory allocation
+#include <string.h> // string manipulation function
+#include <unistd.h> // POSIX API for low-level I/O, here for socket functions
+#include <sys/socket.h> // manages the socket creation and operation
+#include <netinet/in.h>  // Definitions for internet addresses and socket structures (IPv4/IPv6)
+#include <arpa/inet.h> // Functions for IP address conversion between binary and text form
+#include <sodium.h> // sodium library for cryptography functions
 
 #define PORT1 14660   // Port to receive data from PX4
 #define PORT2 14662   // Port to receive encrypted data from Server 2
