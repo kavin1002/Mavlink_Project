@@ -1,4 +1,4 @@
-// Server 2 (gcs_udp) using Salsa20
+// Server 2 (gcs_udp) using Salsa20 with circular buffer nonce storage
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,31 +17,33 @@
 
 #define MESSAGE_LEN 2048
 #define NONCE_LEN crypto_stream_salsa20_NONCEBYTES
-#define CIPHERTEXT_LEN (MESSAGE_LEN)
-#define MAX_NONCES 100000     // Maximum number of nonces to track for verification
+#define CIPHERTEXT_LEN (MESSAGE_LEN + crypto_stream_salsa20_NONCEBYTES)
+#define MAX_NONCES 100000     // Maximum number of nonces to track
 
 #define KEY_FILE "session_key.bin" // Path to the Salsa20 session key file
 #define KEY_SIZE crypto_stream_salsa20_KEYBYTES
 
-// Global counter for generating unique even nonces
-uint64_t nonce_counter = 2;  // Start with 2 for even nonces
-unsigned char used_nonces[MAX_NONCES][NONCE_LEN];  // Array to store used nonces
-int nonce_count = 0;
 unsigned char key[KEY_SIZE]; // Session key
+uint64_t nonce_counter = 2;  // Start with 2 for even nonces
+unsigned char used_nonces[MAX_NONCES][NONCE_LEN]; // Circular buffer for nonces
+int nonce_head = 0; // Points to the position to overwrite (oldest nonce)
+int nonce_count = 0; // Tracks the total number of stored nonces
 
-// Function to load the session key from file
 int load_session_key() {
     FILE *file = fopen(KEY_FILE, "rb");
     if (!file) {
         perror("Failed to open key file");
         return -1;
     }
-    fread(key, 1, KEY_SIZE, file);
+    if (fread(key, 1, KEY_SIZE, file) != KEY_SIZE) {
+        perror("Failed to read key file");
+        fclose(file);
+        return -1;
+    }
     fclose(file);
     return 0;
 }
 
-// Function to check if a nonce has already been used
 bool is_nonce_used(unsigned char *nonce) {
     for (int i = 0; i < nonce_count; i++) {
         if (memcmp(used_nonces[i], nonce, NONCE_LEN) == 0) {
@@ -51,92 +53,90 @@ bool is_nonce_used(unsigned char *nonce) {
     return false;
 }
 
-// Function to store a new nonce in the used_nonces array
 void store_nonce(unsigned char *nonce) {
+    memcpy(used_nonces[nonce_head], nonce, NONCE_LEN);
+    nonce_head = (nonce_head + 1) % MAX_NONCES;
     if (nonce_count < MAX_NONCES) {
-        memcpy(used_nonces[nonce_count++], nonce, NONCE_LEN);
-    } else {
-        printf("Nonce storage full. Increase MAX_NONCES or clear nonces periodically.\n");
-        exit(1); // Stop the server when nonce storage is full
+        nonce_count++;
     }
 }
 
-// Function to generate a unique even nonce using the counter
 void generate_nonce(unsigned char *nonce) {
-    memset(nonce, 0, NONCE_LEN);                         // Clear the nonce buffer
-    memcpy(nonce, &nonce_counter, sizeof(nonce_counter)); // Copy the counter into the nonce
-    nonce_counter += 2;                                   // Increment by 2 to keep it even
+    memset(nonce, 0, NONCE_LEN);
+    memcpy(nonce, &nonce_counter, sizeof(nonce_counter));
+    nonce_counter += 2; // Increment by 2 to keep it even
 }
 
 int main() {
     int sockfd1, sockfd3;
     struct sockaddr_in servaddr1, servaddr3, qground_addr, server1_send_addr;
-    int len, n;
+    socklen_t len;
+    ssize_t n;
     unsigned char buffer[MESSAGE_LEN];
     unsigned char nonce[NONCE_LEN];
-    unsigned char ciphertext[CIPHERTEXT_LEN + NONCE_LEN];
+    unsigned char ciphertext[CIPHERTEXT_LEN];
     unsigned char decrypted[MESSAGE_LEN];
 
-    // Initialize libsodium
     if (sodium_init() < 0) {
-        printf("Libsodium initialization failed.\n");
+        fprintf(stderr, "Libsodium initialization failed.\n");
         return 1;
     }
 
-    // Load session key
     if (load_session_key() != 0) {
-        printf("Failed to load session key. Exiting.\n");
+        fprintf(stderr, "Failed to load session key.\n");
         return 1;
     }
 
-    // Create socket file descriptors
-    if ((sockfd1 = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+    sockfd1 = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd1 < 0) {
         perror("Socket 1 creation failed");
-        exit(EXIT_FAILURE);
-    }
-    if ((sockfd3 = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("Socket 3 creation failed");
-        exit(EXIT_FAILURE);
+        return 1;
     }
 
-    // Bind sockfd1 to PORT1 (receive from Server 1 on port 14661)
+    sockfd3 = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd3 < 0) {
+        perror("Socket 3 creation failed");
+        close(sockfd1);
+        return 1;
+    }
+
     memset(&servaddr1, 0, sizeof(servaddr1));
     servaddr1.sin_family = AF_INET;
     servaddr1.sin_addr.s_addr = INADDR_ANY;
     servaddr1.sin_port = htons(PORT1);
 
-    if (bind(sockfd1, (const struct sockaddr *)&servaddr1, sizeof(servaddr1)) < 0) {
+    if (bind(sockfd1, (struct sockaddr *)&servaddr1, sizeof(servaddr1)) < 0) {
         perror("Bind failed on PORT1");
-        exit(EXIT_FAILURE);
+        close(sockfd1);
+        close(sockfd3);
+        return 1;
     }
 
-    // Bind sockfd3 to PORT3 (receive from QGroundControl on port 14551)
     memset(&servaddr3, 0, sizeof(servaddr3));
     servaddr3.sin_family = AF_INET;
     servaddr3.sin_addr.s_addr = INADDR_ANY;
     servaddr3.sin_port = htons(PORT3);
 
-    if (bind(sockfd3, (const struct sockaddr *)&servaddr3, sizeof(servaddr3)) < 0) {
+    if (bind(sockfd3, (struct sockaddr *)&servaddr3, sizeof(servaddr3)) < 0) {
         perror("Bind failed on PORT3");
-        exit(EXIT_FAILURE);
+        close(sockfd1);
+        close(sockfd3);
+        return 1;
     }
 
-    // Setup destination address for QGroundControl (send to port 14550)
     memset(&qground_addr, 0, sizeof(qground_addr));
     qground_addr.sin_family = AF_INET;
-    qground_addr.sin_port = htons(PORT2);  // QGroundControl's listening port 14550
-    inet_pton(AF_INET, "127.0.0.1", &qground_addr.sin_addr);  // Assuming localhost
+    qground_addr.sin_port = htons(PORT2);
+    inet_pton(AF_INET, "127.0.0.1", &qground_addr.sin_addr);
 
-    // Setup destination address for Server 1 (send back to port 14662)
     memset(&server1_send_addr, 0, sizeof(server1_send_addr));
     server1_send_addr.sin_family = AF_INET;
-    server1_send_addr.sin_port = htons(SERVER1_PORT);  // Port 14662
-    inet_pton(AF_INET, "127.0.0.1", &server1_send_addr.sin_addr);  // Assuming localhost
+    server1_send_addr.sin_port = htons(SERVER1_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &server1_send_addr.sin_addr);
 
     printf("Server 2 listening on ports %d (from Server 1), %d (to QGroundControl), and %d (from QGroundControl)\n", PORT1, PORT2, PORT3);
 
     while (1) {
-        // Receive from both sockets in a non-blocking manner
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(sockfd1, &readfds);
@@ -146,49 +146,28 @@ int main() {
         int activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
 
         if (FD_ISSET(sockfd1, &readfds)) {
-            // Received encrypted data from Server 1
             n = recvfrom(sockfd1, ciphertext, sizeof(ciphertext), MSG_WAITALL, (struct sockaddr *)&servaddr1, &len);
-
-            // Extract the nonce from the message
-            memcpy(nonce, ciphertext, NONCE_LEN);
-
-            // Verify the nonce to prevent replay attacks
-            if (is_nonce_used(nonce)) {
-                printf("Replay attack detected! Nonce has already been used.\n");
-                continue;
-            } else {
-                // Store the nonce to prevent future reuse
-                store_nonce(nonce);
+            if (n > NONCE_LEN) {
+                memcpy(nonce, ciphertext, NONCE_LEN);
+                if (!is_nonce_used(nonce)) {
+                    store_nonce(nonce);
+                    crypto_stream_salsa20_xor(decrypted, ciphertext + NONCE_LEN, n - NONCE_LEN, nonce, key);
+                    sendto(sockfd3, decrypted, n - NONCE_LEN, MSG_CONFIRM, (struct sockaddr *)&qground_addr, sizeof(qground_addr));
+                } else {
+                    printf("Replay attack detected! Nonce has already been used.\n");
+                }
             }
-
-            // Decrypt the message with Salsa20
-            crypto_stream_salsa20_xor(decrypted, ciphertext + NONCE_LEN, n - NONCE_LEN, nonce, key);
-
-            // Send decrypted message to QGroundControl
-            sendto(sockfd3, decrypted, n - NONCE_LEN, MSG_CONFIRM, (const struct sockaddr *)&qground_addr, sizeof(qground_addr));
-            printf("Decrypted and forwarded to QGroundControl on port %d\n", PORT2);
         }
 
         if (FD_ISSET(sockfd3, &readfds)) {
-            // Received data from QGroundControl
             n = recvfrom(sockfd3, buffer, MESSAGE_LEN, MSG_WAITALL, (struct sockaddr *)&qground_addr, &len);
-
-            // Generate a unique even nonce
-            generate_nonce(nonce);
-
-            // Re-encrypt the message with Salsa20 before sending back to Server 1
-            crypto_stream_salsa20_xor(ciphertext + NONCE_LEN, buffer, n, nonce, key);
-
-            // Prepend nonce to the ciphertext
-            memcpy(ciphertext, nonce, NONCE_LEN);
-            int ciphertext_len = n + NONCE_LEN;
-
-            // Store the nonce for future verification
-            store_nonce(nonce);
-
-            // Send re-encrypted message (including nonce) back to Server 1 on port 14662
-            sendto(sockfd1, ciphertext, ciphertext_len, MSG_CONFIRM, (const struct sockaddr *)&server1_send_addr, sizeof(server1_send_addr));
-            printf("Re-encrypted and forwarded to Server 1 on port %d\n", SERVER1_PORT);
+            if (n > 0) {
+                generate_nonce(nonce);
+                crypto_stream_salsa20_xor(ciphertext + NONCE_LEN, buffer, n, nonce, key);
+                memcpy(ciphertext, nonce, NONCE_LEN);
+                store_nonce(nonce);
+                sendto(sockfd1, ciphertext, n + NONCE_LEN, MSG_CONFIRM, (struct sockaddr *)&server1_send_addr, sizeof(server1_send_addr));
+            }
         }
     }
 

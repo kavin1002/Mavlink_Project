@@ -1,4 +1,4 @@
-// Server 1 (uav_udp) using Salsa20
+// Server 1 (uav_udp) using Salsa20 with circular buffer nonce storage
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,16 +17,17 @@
 
 #define MESSAGE_LEN 2048
 #define NONCE_LEN crypto_stream_salsa20_NONCEBYTES
-#define CIPHERTEXT_LEN (MESSAGE_LEN)
+#define CIPHERTEXT_LEN (MESSAGE_LEN + crypto_stream_salsa20_KEYBYTES)
 #define MAX_NONCES 100000     // Maximum number of nonces to track for verification
 
 #define KEY_FILE "session_key.bin" // Path to the Salsa20 session key file
 #define KEY_SIZE crypto_stream_salsa20_KEYBYTES
 
-// Global counter for generating unique odd nonces
+// Global variables
 uint64_t nonce_counter = 1;  // Start with 1 for odd nonces
-unsigned char used_nonces[MAX_NONCES][NONCE_LEN];  // Array to store used nonces
-int nonce_count = 0;
+unsigned char used_nonces[MAX_NONCES][NONCE_LEN]; // Circular buffer for nonces
+int nonce_head = 0; // Points to the position to overwrite (oldest nonce)
+int nonce_count = 0; // Tracks the total number of stored nonces (up to MAX_NONCES)
 unsigned char key[KEY_SIZE]; // Session key
 
 // Function to load the session key from file
@@ -51,12 +52,17 @@ bool is_nonce_used(unsigned char *nonce) {
     return false;
 }
 
-// Function to store a new nonce in the used_nonces array
+// Function to store a new nonce in the circular buffer
 void store_nonce(unsigned char *nonce) {
+    // Store the new nonce in the circular buffer
+    memcpy(used_nonces[nonce_head], nonce, NONCE_LEN);
+
+    // Move the head pointer to the next position, wrapping around if necessary
+    nonce_head = (nonce_head + 1) % MAX_NONCES;
+
+    // Increment the nonce count, ensuring it doesn't exceed MAX_NONCES
     if (nonce_count < MAX_NONCES) {
-        memcpy(used_nonces[nonce_count++], nonce, NONCE_LEN);
-    } else {
-        printf("Nonce storage full. Increase MAX_NONCES or clear nonces periodically.\n");
+        nonce_count++;
     }
 }
 
@@ -163,7 +169,7 @@ int main() {
 
             // Send encrypted message (including nonce) to Server 2 on port 14661
             sendto(sockfd1, ciphertext, ciphertext_len, MSG_CONFIRM, (const struct sockaddr *)&server2_addr, sizeof(server2_addr));
-            printf("Encrypted and forwarded to Server 2 on port %d\n", SERVER2_PORT);
+            // printf("Encrypted and forwarded to Server 2 on port %d\n", SERVER2_PORT);
         }
 
         if (FD_ISSET(sockfd2, &readfds)) {
@@ -187,7 +193,7 @@ int main() {
 
             // Send decrypted message to PX4 on port 14556
             sendto(sockfd1, decrypted, n - NONCE_LEN, MSG_CONFIRM, (const struct sockaddr *)&px4_addr, sizeof(px4_addr));
-            printf("Decrypted and forwarded to PX4 on port %d\n", PX4_PORT);
+            // printf("Decrypted and forwarded to PX4 on port %d\n", PX4_PORT);
         }
     }
 
