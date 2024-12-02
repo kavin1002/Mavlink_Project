@@ -54,17 +54,16 @@ with open(args.output_file, 'w') as file:
                 gcs_memory_info = gcs_process.memory_info()
                 gcs_memory_usage_mb = gcs_memory_info.rss / (1024 * 1024)  # Convert bytes to MB
 
-            # Calculate the average CPU and memory usage
-            avg_cpu_usage = (uav_cpu_usage + gcs_cpu_usage) / 2
-            avg_memory_usage = (uav_memory_usage_mb + gcs_memory_usage_mb) / 2
+            # # Calculate the average CPU and memory usage
+            # avg_cpu_usage = (uav_cpu_usage + gcs_cpu_usage) / 2
+            # avg_memory_usage = (uav_memory_usage_mb + gcs_memory_usage_mb) / 2
 
             # Write the data to the file
-            file.write(f"{current_time},{uav_cpu_usage},{uav_memory_usage_mb},{gcs_cpu_usage},{gcs_memory_usage_mb},{avg_cpu_usage},{avg_memory_usage}\n")
+            file.write(f"{current_time},{uav_cpu_usage},{uav_memory_usage_mb},{gcs_cpu_usage},{gcs_memory_usage_mb}\n")
             file.flush()  # Ensure data is written to the file
 
             print(f"Time: {current_time}, UAV CPU: {uav_cpu_usage}%, UAV Memory: {uav_memory_usage_mb:.2f} MB, "
-                  f"GCS CPU: {gcs_cpu_usage}%, GCS Memory: {gcs_memory_usage_mb:.2f} MB, "
-                  f"Average CPU: {avg_cpu_usage}%, Average Memory: {avg_memory_usage:.2f} MB")
+                  f"GCS CPU: {gcs_cpu_usage}%, GCS Memory: {gcs_memory_usage_mb:.2f} MB, ")
 
     except KeyboardInterrupt:
         print("\nMonitoring stopped by user.")

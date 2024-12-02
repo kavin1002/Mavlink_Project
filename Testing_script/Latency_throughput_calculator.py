@@ -8,7 +8,7 @@ parser.add_argument('output_file', type=str, help='Output CSV file name')
 args = parser.parse_args()
 
 # Load the input CSV file
-df = pd.read_csv(args.input_file)
+df = pd.read_csv(args.input_file, encoding='ISO-8859-1')
 
 # Convert the 'Time' column to a numeric format
 df['Time'] = pd.to_numeric(df['Time'])
